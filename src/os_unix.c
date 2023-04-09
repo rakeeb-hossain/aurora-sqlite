@@ -3553,7 +3553,6 @@ static int unixWrite(
   }
 #endif
 
-  assert(pFile->pMapRegion != 0);
 #if defined(SQLITE_MMAP_READWRITE) && SQLITE_MAX_MMAP_SIZE>0
   /* Deal with as much of this write request as possible by transfering
   ** data from the memory mapping using memcpy().  */
@@ -6048,6 +6047,7 @@ static int getFileMode(
 ** FAT filesystems and permissions do not matter there, so just use
 ** the default permissions.  In 8_3_NAMES mode, leave *pMode set to zero.
 */
+#include<unistd.h>
 static int findCreateFileMode(
   const char *zPath,              /* Path of file (possibly) being created */
   int flags,                      /* Flags passed as 4th argument to xOpen() */

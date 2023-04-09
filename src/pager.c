@@ -21,7 +21,7 @@
 #ifndef SQLITE_OMIT_DISKIO
 #include "sqliteInt.h"
 #include "wal.h"
-
+#include <stdio.h>
 
 /******************* NOTES ON THE DESIGN OF THE PAGER ************************
 **
@@ -4639,7 +4639,7 @@ int sqlite3PagerFlush(Pager *pPager){
 ** The zFilename argument is the path to the database file to open.
 ** If zFilename is NULL then a randomly-named temporary file is created
 ** and used as the file to be cached. Temporary files are be deleted
-** automatically when they are closed. If zFilename is ":memory:" then 
+** automatically when they are closed. If zFilename is ":memory:" then
 ** all information is held in cache. It is never written to disk. 
 ** This can be used to implement an in-memory database.
 **

@@ -646,6 +646,7 @@ __declspec(dllexport)
 ** This routine is called when the extension is loaded.
 ** Register the new VFS.
 */
+#include <stdio.h>
 int sqlite3_appendvfs_init(
   sqlite3 *db, 
   char **pzErrMsg, 
