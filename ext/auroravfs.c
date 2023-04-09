@@ -8,8 +8,8 @@
 **
 ** Shared memory is implemented using the usual os_unix VFS, so WAL is enabled
 ** and can be used.
-                                                       **
-                                                               ** USAGE:
+**
+** USAGE:
 **
 **    sqlite3_open_v2("file:/whatever?ptr=0xf05538&sz=14336&max=65536", &db,
 **                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_URI,
@@ -20,16 +20,16 @@
 **    ptr=          The address of the memory buffer that holds the database.
 **
 **    sz=           The current size the database file
-        **
-        **    maxsz=        The maximum size of the database.  In other words, the
-        **                  amount of space allocated for the ptr= buffer.
-                                                                   **
-                                                                           **    freeonclose=  If true, then sqlite3_free() is called on the ptr=
+**
+**    maxsz=        The maximum size of the database.  In other words, the
+**                  amount of space allocated for the ptr= buffer.
+**
+**    freeonclose=  If true, then sqlite3_free() is called on the ptr=
 **                  value when the connection closes.
 **
 ** The ptr= and sz= query parameters are required.  If maxsz= is omitted,
 ** then it defaults to the sz= value.  Parameter values can be in either
-        ** decimal or hexadecimal.  The filename in the URI is ignored.
+** decimal or hexadecimal.  The filename in the URI is ignored.
 */
 #include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT1
@@ -47,6 +47,7 @@ typedef struct AuroraFile AuroraFile;
 ** access to randomness, etc.
 */
 #define ORIGVFS(p) ((sqlite3_vfs*)((p)->pAppData))
+#define ORIGFILE(p) ((sqlite3_file*)(((AuroraFile*)(p))+1))
 
 /* An open file */
 struct AuroraFile {
@@ -54,7 +55,8 @@ struct AuroraFile {
     sqlite3_int64 sz;               /* Size of the file */
     sqlite3_int64 szMax;            /* Space allocated to aData */
     unsigned char *aData;           /* content of the file */
-    int bFreeOnClose;               /* Invoke sqlite3_free() on aData at close */
+    sqlite3_file *pReal;            /* The real underlying file */
+    int isAurMmap;                  /* Should we use Aurora methods or fallback to underlying VFS? */
 };
 
 /*
@@ -150,8 +152,11 @@ static const sqlite3_io_methods aurora_io_methods = {
 */
 static int auroraClose(sqlite3_file *pFile){
     AuroraFile *p = (AuroraFile *)pFile;
-    if( p->bFreeOnClose ) sqlite3_free(p->aData);
-    return SQLITE_OK;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xClose(p->pReal);
+    }
 }
 
 /*
@@ -164,8 +169,13 @@ static int auroraRead(
         sqlite_int64 iOfst
 ){
     AuroraFile *p = (AuroraFile *)pFile;
-    memcpy(zBuf, p->aData+iOfst, iAmt);
-    return SQLITE_OK;
+    if (p->isAurMmap) {
+        AuroraFile *p = (AuroraFile *)pFile;
+        memcpy(zBuf, p->aData+iOfst, iAmt);
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xRead(p->pReal, zBuf, iAmt, iOfst);
+    }
 }
 
 /*
@@ -178,13 +188,17 @@ static int auroraWrite(
         sqlite_int64 iOfst
 ){
     AuroraFile *p = (AuroraFile *)pFile;
-    if( iOfst+iAmt>p->sz ){
-        if( iOfst+iAmt>p->szMax ) return SQLITE_FULL;
-        if( iOfst>p->sz ) memset(p->aData+p->sz, 0, iOfst-p->sz);
-        p->sz = iOfst+iAmt;
+    if (p->isAurMmap) {
+        if( iOfst+iAmt>p->sz ){
+            if( iOfst+iAmt>p->szMax ) return SQLITE_FULL;
+            if( iOfst>p->sz ) memset(p->aData+p->sz, 0, iOfst-p->sz);
+            p->sz = iOfst+iAmt;
+        }
+        memcpy(p->aData+iOfst, z, iAmt);
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xWrite(p->pReal, z, iAmt, iOfst);
     }
-    memcpy(p->aData+iOfst, z, iAmt);
-    return SQLITE_OK;
 }
 
 /*
@@ -192,19 +206,28 @@ static int auroraWrite(
 */
 static int auroraTruncate(sqlite3_file *pFile, sqlite_int64 size){
     AuroraFile *p = (AuroraFile *)pFile;
-    if( size>p->sz ){
-        if( size>p->szMax ) return SQLITE_FULL;
-        memset(p->aData+p->sz, 0, size-p->sz);
+    if (p->isAurMmap) {
+        if( size>p->sz ){
+            if( size>p->szMax ) return SQLITE_FULL;
+            memset(p->aData+p->sz, 0, size-p->sz);
+        }
+        p->sz = size;
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xTruncate(p->pReal, size);
     }
-    p->sz = size;
-    return SQLITE_OK;
 }
 
 /*
 ** Sync an aurora-file.
 */
 static int auroraSync(sqlite3_file *pFile, int flags){
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xSync(p->pReal, flags);
+    }
 }
 
 /*
@@ -212,30 +235,49 @@ static int auroraSync(sqlite3_file *pFile, int flags){
 */
 static int auroraFileSize(sqlite3_file *pFile, sqlite_int64 *pSize){
     AuroraFile *p = (AuroraFile *)pFile;
-    *pSize = p->sz;
-    return SQLITE_OK;
+    if (p->isAurMmap) {
+        *pSize = p->sz;
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xFileSize(p->pReal, pSize);
+    }
 }
 
 /*
 ** Lock an aurora-file.
 */
 static int auroraLock(sqlite3_file *pFile, int eLock){
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xLock(p->pReal, eLock);
+    }
 }
 
 /*
 ** Unlock an aurora-file.
 */
 static int auroraUnlock(sqlite3_file *pFile, int eLock){
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xUnlock(p->pReal, eLock);
+    }
 }
 
 /*
 ** Check if another file-handle holds a RESERVED lock on an aurora-file.
 */
 static int auroraCheckReservedLock(sqlite3_file *pFile, int *pResOut){
-    *pResOut = 0;
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        *pResOut = 0;
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xCheckReservedLock(p->pReal, pResOut);
+    }
 }
 
 /*
@@ -243,19 +285,28 @@ static int auroraCheckReservedLock(sqlite3_file *pFile, int *pResOut){
 */
 static int auroraFileControl(sqlite3_file *pFile, int op, void *pArg){
     AuroraFile *p = (AuroraFile *)pFile;
-    int rc = SQLITE_NOTFOUND;
-    if( op==SQLITE_FCNTL_VFSNAME ){
-        *(char**)pArg = sqlite3_mprintf("mem(%p,%lld)", p->aData, p->sz);
-        rc = SQLITE_OK;
+    if (p->isAurMmap) {
+        int rc = SQLITE_NOTFOUND;
+        if( op==SQLITE_FCNTL_VFSNAME ){
+            *(char**)pArg = sqlite3_mprintf("mem(%p,%lld)", p->aData, p->sz);
+            rc = SQLITE_OK;
+        }
+        return rc;
+    } else {
+        return p->pReal->pMethods->xFileControl(p->pReal, op, pArg);
     }
-    return rc;
 }
 
 /*
 ** Return the sector-size in bytes for an aurora-file.
 */
 static int auroraSectorSize(sqlite3_file *pFile){
-    return 1024;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return 1024;
+    } else {
+        return p->pReal->pMethods->xSectorSize(p->pReal);
+    }
 }
 
 /*
@@ -276,22 +327,42 @@ static int auroraShmMap(
         int bExtend,
         void volatile **pp
 ){
-    return SQLITE_IOERR_SHMMAP;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_IOERR_SHMMAP;
+    } else {
+        return p->pReal->pMethods->xShmMap(p->pReal, iPg, pgsz, bExtend, pp);
+    }
 }
 
 /* Perform locking on a shared-memory segment */
 static int auroraShmLock(sqlite3_file *pFile, int offset, int n, int flags){
-    return SQLITE_IOERR_SHMLOCK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_IOERR_SHMLOCK;
+    } else {
+        return p->pReal->pMethods->xShmLock(p->pReal, offset, n, flags);
+    }
 }
 
 /* Memory barrier operation on shared memory */
 static void auroraShmBarrier(sqlite3_file *pFile){
-    return;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return;
+    } else {
+        p->pReal->pMethods->xShmBarrier(p->pReal);
+    }
 }
 
 /* Unmap a shared memory segment */
 static int auroraShmUnmap(sqlite3_file *pFile, int deleteFlag){
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xShmUnmap(p->pReal, deleteFlag);
+    }
 }
 
 /* Fetch a page of a memory-mapped file */
@@ -302,13 +373,22 @@ static int auroraFetch(
         void **pp
 ){
     AuroraFile *p = (AuroraFile *)pFile;
-    *pp = (void*)(p->aData + iOfst);
-    return SQLITE_OK;
+    if (p->isAurMmap) {
+        *pp = (void*)(p->aData + iOfst);
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xFetch(p->pReal, iOfst, iAmt, pp);
+    }
 }
 
 /* Release a memory-mapped page */
 static int auroraUnfetch(sqlite3_file *pFile, sqlite3_int64 iOfst, void *pPage){
-    return SQLITE_OK;
+    AuroraFile *p = (AuroraFile *)pFile;
+    if (p->isAurMmap) {
+        return SQLITE_OK;
+    } else {
+        return p->pReal->pMethods->xUnfetch(p->pReal, iOfst, pPage);
+    }
 }
 
 /*
@@ -323,16 +403,25 @@ static int auroraOpen(
 ){
     AuroraFile *p = (AuroraFile*)pFile;
     memset(p, 0, sizeof(*p));
-    if( (flags & SQLITE_OPEN_MAIN_DB)==0 ) return SQLITE_CANTOPEN;
-    p->aData = (unsigned char*)sqlite3_uri_int64(zName,"ptr",0);
-    if( p->aData==0 ) return SQLITE_CANTOPEN;
-    p->sz = sqlite3_uri_int64(zName,"sz",0);
-    if( p->sz<0 ) return SQLITE_CANTOPEN;
-    p->szMax = sqlite3_uri_int64(zName,"max",p->sz);
-    if( p->szMax<p->sz ) return SQLITE_CANTOPEN;
-    p->bFreeOnClose = sqlite3_uri_boolean(zName,"freeonclose",0);
+    int rc = SQLITE_OK;
+
+    p->pReal = (sqlite3_file*)&p[1];
+    int isAurMmap = (flags & SQLITE_OPEN_MAIN_DB);
+    p->isAurMmap = isAurMmap;
+
+    if (isAurMmap) {
+        p->aData = (unsigned char*)sqlite3_uri_int64(zName,"ptr",0);
+        if( p->aData==0 ) return SQLITE_CANTOPEN;
+        p->sz = sqlite3_uri_int64(zName,"sz",0);
+        if( p->sz<0 ) return SQLITE_CANTOPEN;
+        p->szMax = sqlite3_uri_int64(zName,"max",p->sz);
+        if( p->szMax<p->sz ) return SQLITE_CANTOPEN;
+    } else {
+        rc = ORIGVFS(pVfs)->xOpen(ORIGVFS(pVfs), zName, p->pReal, flags, pOutFlags);
+    }
+
     pFile->pMethods = &aurora_io_methods;
-    return SQLITE_OK;
+    return rc;
 }
 
 /*
@@ -444,18 +533,11 @@ int sqlite3_auroravfs_init(
 ){
     int rc = SQLITE_OK;
     SQLITE_EXTENSION_INIT2(pApi);
+    // Loads default VFS into pAppData
     aurora_vfs.pAppData = sqlite3_vfs_find(0);
     if( aurora_vfs.pAppData==0 ) return SQLITE_ERROR;
     aurora_vfs.szOsFile = sizeof(AuroraFile);
     rc = sqlite3_vfs_register(&aurora_vfs, 1);
-#ifdef MEMVFS_TEST
-    if( rc==SQLITE_OK ){
-    rc = sqlite3_auto_extension((void(*)(void))auroravfsRegister);
-  }
-  if( rc==SQLITE_OK ){
-    rc = auroravfsRegister(db, pzErrMsg, pApi);
-  }
-#endif
     if( rc==SQLITE_OK ) rc = SQLITE_OK_LOAD_PERMANENTLY;
     return rc;
 }

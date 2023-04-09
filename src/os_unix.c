@@ -3553,6 +3553,7 @@ static int unixWrite(
   }
 #endif
 
+  assert(pFile->pMapRegion != 0);
 #if defined(SQLITE_MMAP_READWRITE) && SQLITE_MAX_MMAP_SIZE>0
   /* Deal with as much of this write request as possible by transfering
   ** data from the memory mapping using memcpy().  */
@@ -5229,7 +5230,7 @@ static void unixRemapfile(
     pNew = osMremap(pOrig, nReuse, nNew, MREMAP_MAYMOVE);
     zErr = "mremap";
 #else
-    pNew = osMmap(pReq, nNew-nReuse, flags, MAP_SHARED, h, nReuse);
+    pNew = osMmap(pReq, nNew-nReuse, flags, MAP_SHARED, 0, nReuse);
     if( pNew!=MAP_FAILED ){
       if( pNew!=pReq ){
         osMunmap(pNew, nNew - nReuse);
@@ -5248,7 +5249,7 @@ static void unixRemapfile(
 
   /* If pNew is still NULL, try to create an entirely new mapping. */
   if( pNew==0 ){
-    pNew = osMmap(0, nNew, flags, MAP_SHARED, h, 0);
+    pNew = osMmap(0, nNew, flags, MAP_SHARED, 0, 0);
   }
 
   if( pNew==MAP_FAILED ){
