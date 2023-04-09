@@ -60,7 +60,8 @@ struct AuroraFile {
     unsigned char *aData;           /* content of the file */
     sqlite3_file *pReal;            /* The real underlying file */
     int isAurMmap;                  /* Should we use Aurora methods or fallback to underlying VFS? */
-    char *fileName;                    /* Name of file */
+    char *fileName;                 /* Name of file */
+    int oid;                        /* Aurora partition OID */
 };
 
 /*
@@ -441,22 +442,6 @@ static int auroraOpen(
     int isAurMmap = (flags & SQLITE_OPEN_MAIN_DB);
     p->isAurMmap = isAurMmap;
 
-    if (flags & SQLITE_OPEN_MAIN_DB) {
-        // printf("opening main DB...\n");
-    } else if (flags & SQLITE_OPEN_WAL) {
-        // printf("opening WAL...\n");
-    } else if (flags & SQLITE_OPEN_TEMP_DB) {
-        // printf("opening Temp DB...\n");
-    } else if (flags & SQLITE_OPEN_FULLMUTEX) {
-        // printf("opening full mutex...\n");
-    } else if (flags & SQLITE_OPEN_NOMUTEX) {
-        // printf("opening no mutex...\n");
-    } else if (flags & SQLITE_OPEN_MAIN_JOURNAL) {
-        // printf("opening main journal...\n");
-    } else {
-        // printf("opening something else... %d\n", flags);
-    }
-
     if (isAurMmap) {
         p->aData = (unsigned char*)sqlite3_uri_int64(zName,"ptr",0);
         if( p->aData==0 ) return SQLITE_CANTOPEN;
@@ -464,6 +449,9 @@ static int auroraOpen(
         if( p->sz<0 ) return SQLITE_CANTOPEN;
         p->szMax = sqlite3_uri_int64(zName,"max",p->sz);
         if( p->szMax<p->sz ) return SQLITE_CANTOPEN;
+        p->oid = sqlite3_uri_int64(zName,"oid",0);
+        if( p->oid==0 ) return SQLITE_CANTOPEN;
+
         mainDbName = sqlite3_malloc(strlen(zName));
         strcpy(mainDbName, zName);
 
