@@ -36,6 +36,7 @@ SQLITE_EXTENSION_INIT1
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
+#include <sls.h>
 
 /*
 ** Forward declaration of objects used by this utility
@@ -237,6 +238,11 @@ static int auroraSync(sqlite3_file *pFile, int flags){
     // printf("auroraSync\n");
     AuroraFile *p = (AuroraFile *)pFile;
     if (p->isAurMmap) {
+		printf("%d", p->oid);
+		int rc = sls_memsnap(p->oid, p->aData);
+		if (rc < 0) {
+			return SQLITE_ERROR_SNAPSHOT;
+		}
         return SQLITE_OK;
     } else {
         return p->pReal->pMethods->xSync(p->pReal, flags);
