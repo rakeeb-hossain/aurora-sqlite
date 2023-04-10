@@ -238,7 +238,6 @@ static int auroraSync(sqlite3_file *pFile, int flags){
     // printf("auroraSync\n");
     AuroraFile *p = (AuroraFile *)pFile;
     if (p->isAurMmap) {
-		printf("%d", p->oid);
 		int rc = sls_memsnap(p->oid, p->aData);
 		if (rc < 0) {
 			return SQLITE_ERROR_SNAPSHOT;
