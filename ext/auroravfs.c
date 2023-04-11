@@ -36,7 +36,7 @@ SQLITE_EXTENSION_INIT1
 #include <string.h>
 #include <assert.h>
 #include <stdio.h>
-#include <sls.h>
+#include <sys/mman.h>
 
 /*
 ** Forward declaration of objects used by this utility
@@ -235,10 +235,9 @@ static int auroraTruncate(sqlite3_file *pFile, sqlite_int64 size){
 ** Sync an aurora-file.
 */
 static int auroraSync(sqlite3_file *pFile, int flags){
-    // printf("auroraSync\n");
     AuroraFile *p = (AuroraFile *)pFile;
     if (p->isAurMmap) {
-		int rc = sls_memsnap(p->oid, p->aData);
+        int rc = msync(p->aData, p->szMax, MS_SYNC);
 		if (rc < 0) {
 			return SQLITE_ERROR_SNAPSHOT;
 		}
@@ -584,7 +583,6 @@ static int auroraCurrentTimeInt64(sqlite3_vfs *pVfs, sqlite3_int64 *p){
 ** This routine is called when the extension is loaded.
 ** Register the new VFS.
 */
-#include <stdlib.h>
 int sqlite3_auroravfs_init(
         sqlite3 *db,
         char **pzErrMsg,
